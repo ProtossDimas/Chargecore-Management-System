@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>NEXUS — EV & BSS Asset Control Center</title>
+<title>Chargecore — EV & BSS Asset Control Center</title>
 <style>
 :root{
   --bg-0:#060b09;
@@ -51,7 +51,7 @@ body{
   position:relative; z-index:5;
 }
 .brand{ display:flex; align-items:center; gap:11px; }
-.brand svg{ width:26px; height:26px; }
+.brand-logo{ width:32px; height:32px; object-fit:contain; border-radius:6px; }
 .brand-text{ font-weight:800; letter-spacing:0.5px; font-size:16px; }
 .brand-text span{ color:var(--green); }
 .brand-sub{ font-family:var(--mono); font-size:10px; color:var(--text-2); letter-spacing:1.5px; margin-top:1px; }
@@ -318,12 +318,9 @@ td.mono{ font-family:var(--mono); font-size:11.5px; color:var(--text-2); }
   <!-- TOPBAR -->
   <div class="topbar">
     <div class="brand">
-      <svg viewBox="0 0 100 100" fill="none">
-        <path d="M70 20A35 35 0 1 0 70 80" stroke="#5CE07A" stroke-width="13" stroke-linecap="round"/>
-        <rect x="66" y="42" width="16" height="16" fill="#5CE07A"/>
-      </svg>
+      <img src="/logo/chargecoreglobal.jpeg" alt="Chargecore" class="brand-logo"/>
       <div>
-        <div class="brand-text">NEXUS<span>/</span>OPS</div>
+        <div class="brand-text">CHARGECORE</div>
         <div class="brand-sub">EV CHARGER · BSS · LOGISTICS CONTROL CENTER</div>
       </div>
     </div>
