@@ -310,6 +310,31 @@ td.mono{ font-family:var(--mono); font-size:11.5px; color:var(--text-2); }
 ::-webkit-scrollbar{ width:8px; height:8px; }
 ::-webkit-scrollbar-thumb{ background:rgba(120,255,190,0.12); border-radius:4px; }
 ::-webkit-scrollbar-track{ background:transparent; }
+
+/* ---------- modal (add-data forms) ---------- */
+.modal-overlay{ position:fixed; inset:0; background:rgba(4,8,7,0.65); backdrop-filter:blur(2px); z-index:40; display:none; align-items:center; justify-content:center; }
+.modal-overlay.show{ display:flex; }
+.modal-box{
+  width:440px; max-width:92vw; max-height:86vh; overflow-y:auto;
+  background:var(--panel); border:1px solid var(--line); border-radius:14px;
+  padding:22px; box-shadow:0 20px 60px rgba(0,0,0,0.5);
+}
+.modal-head{ display:flex; align-items:center; justify-content:space-between; margin-bottom:4px; }
+.modal-title{ font-size:16px; font-weight:800; }
+.modal-close{ cursor:pointer; color:var(--text-2); font-size:18px; line-height:1; }
+.modal-sub{ font-size:12px; color:var(--text-2); margin-bottom:18px; }
+.field-group{ margin-bottom:13px; }
+.field-label{ font-family:var(--mono); font-size:10px; letter-spacing:1px; color:var(--text-2); margin-bottom:6px; display:block; }
+.field-input, .field-select{
+  width:100%; background:var(--bg-1); border:1px solid var(--line); border-radius:8px;
+  padding:9px 11px; color:var(--text-0); font-size:13px; font-family:var(--sans);
+}
+.field-input:focus, .field-select:focus{ outline:none; border-color:var(--green-deep); }
+.modal-error{ font-size:12px; color:var(--red); margin-top:6px; display:none; }
+.modal-error.show{ display:block; }
+.modal-actions{ display:flex; gap:8px; margin-top:20px; }
+.modal-actions .btn{ flex:1; }
+.btn[disabled]{ opacity:0.6; cursor:not-allowed; }
 </style>
 </head>
 <body>
@@ -472,7 +497,7 @@ td.mono{ font-family:var(--mono); font-size:11.5px; color:var(--text-2); }
           <div class="view-title">Assets</div>
           <div class="view-desc">EV Charger, Battery Swap Station, dan komponen terkait</div>
         </div>
-        <button class="btn btn-primary">+ Tambah Aset</button>
+        <button class="btn btn-primary" onclick="openModalForm('asset')">+ Tambah Aset</button>
       </div>
       <div class="toolbar">
         <input class="search-input" placeholder="Cari nama, ID, atau serial number...">
@@ -494,7 +519,7 @@ td.mono{ font-family:var(--mono); font-size:11.5px; color:var(--text-2); }
     <div class="view" id="view-maintenance">
       <div class="view-head">
         <div><div class="view-title">Work Orders</div><div class="view-desc">Preventive &amp; corrective maintenance untuk seluruh aset</div></div>
-        <button class="btn btn-primary">+ Work Order Baru</button>
+        <button class="btn btn-primary" onclick="openModalForm('workorder')">+ Work Order Baru</button>
       </div>
       <div class="table-wrap">
         <table>
@@ -521,10 +546,10 @@ td.mono{ font-family:var(--mono); font-size:11.5px; color:var(--text-2); }
     <div class="view" id="view-warehouse">
       <div class="view-head">
         <div><div class="view-title">Warehouse &amp; Inventory</div><div class="view-desc">Stok spare part dan peralatan di setiap gudang</div></div>
-        <button class="btn btn-primary">+ Stock Transfer</button>
+        <button class="btn btn-primary" onclick="openModalForm('inventory')">+ Stock Transfer</button>
       </div>
       <div class="toolbar">
-        <input class="search-input" placeholder="Cari item atau SKU...">
+        <input class="search-input" placeholder="Cari item atau Material Code...">
         <div class="tab-strip">
           <div class="tab-chip active">Semua Gudang</div>
           <div class="tab-chip">Jakarta</div>
@@ -535,7 +560,7 @@ td.mono{ font-family:var(--mono); font-size:11.5px; color:var(--text-2); }
       </div>
       <div class="table-wrap">
         <table>
-          <thead><tr><th>SKU</th><th>Item</th><th>Gudang</th><th>Stok</th><th>Min. Stok</th><th>Level</th><th>Status</th></tr></thead>
+          <thead><tr><th>Material Code</th><th>Item</th><th>Gudang</th><th>Stok</th><th>Min. Stok</th><th>Level</th><th>Status</th></tr></thead>
           <tbody id="invTable"></tbody>
         </table>
       </div>
@@ -545,7 +570,7 @@ td.mono{ font-family:var(--mono); font-size:11.5px; color:var(--text-2); }
     <div class="view" id="view-logistics">
       <div class="view-head">
         <div><div class="view-title">Shipment Tracking</div><div class="view-desc">Pelacakan pengiriman antar gudang dan ke lokasi operasional</div></div>
-        <button class="btn btn-primary">+ Buat Shipment</button>
+        <button class="btn btn-primary" onclick="openModalForm('shipment')">+ Buat Shipment</button>
       </div>
       <div class="table-wrap">
         <table>
@@ -573,6 +598,23 @@ td.mono{ font-family:var(--mono); font-size:11.5px; color:var(--text-2); }
       </div>
     </div>
 
+  </div>
+</div>
+
+<!-- ADD-DATA MODAL -->
+<div class="modal-overlay" id="modalOverlay" onclick="if(event.target===this) closeModalForm()">
+  <div class="modal-box">
+    <div class="modal-head">
+      <div class="modal-title" id="modalTitle">Tambah Data</div>
+      <span class="modal-close" onclick="closeModalForm()">✕</span>
+    </div>
+    <div class="modal-sub" id="modalSub"></div>
+    <div id="modalFields"></div>
+    <div class="modal-error" id="modalError"></div>
+    <div class="modal-actions">
+      <button class="btn" style="flex:1" onclick="closeModalForm()">Batal</button>
+      <button class="btn btn-primary" id="modalSubmitBtn" onclick="submitModalForm()">Simpan</button>
+    </div>
   </div>
 </div>
 
@@ -663,7 +705,7 @@ async function loadAllData(){
     }));
     WO_DATA = (woRaw||[]).map(r=>({id:r.wo_id, asset:r.asset_id, type:r.type, tech:r.technician, status:statusToClass(r.status), due:r.due_date}));
     INC_DATA = (incRaw||[]).map(r=>({id:r.incident_id, asset:r.asset_id, desc:r.description, sev:statusToClass(r.severity), status:r.status, time:r.reported_at}));
-    INV_DATA = (invRaw||[]).map(r=>({sku:r.sku, item:r.item_name, wh:r.warehouse, stock:Number(r.stock)||0, min:Number(r.min_stock)||1, status:statusToClass(r.status)}));
+    INV_DATA = (invRaw||[]).map(r=>({code:r.material_code, item:r.item_name, wh:r.warehouse, stock:Number(r.stock)||0, min:Number(r.min_stock)||1, status:statusToClass(r.status)}));
     SHIP_DATA = (shipRaw||[]).map(r=>({id:r.shipment_id, route:r.route, carrier:r.carrier, status:(r.status||'').toLowerCase().includes('transit')?'transit':'op', eta:r.eta, pod:r.pod||'—'}));
   } else {
     DATA_SOURCE.live = false;
@@ -711,11 +753,11 @@ const MOCK_INC = [
   {id:'INC-2026-0087', asset:'BSS-JKT-002', desc:'Indikator LED berkedip abnormal', sev:'warn', status:'Resolved', time:'01 Sep 2026, 11:20'},
 ];
 const MOCK_INV = [
-  {sku:'BAT-MOD-A100', item:'Battery Module Type-A', wh:'Jakarta', stock:24, min:40, status:'warn'},
-  {sku:'CBL-DC-050', item:'Connector Cable DC-50', wh:'Surabaya', stock:9, min:30, status:'off'},
-  {sku:'FAN-CL-200', item:'Cooling Fan Unit', wh:'Bandung', stock:14, min:25, status:'warn'},
-  {sku:'PCB-CTRL-07', item:'Control Board PCB v7', wh:'Jakarta', stock:56, min:20, status:'op'},
-  {sku:'RLY-40A-3P', item:'Relay 40A 3-Phase', wh:'Bali', stock:31, min:15, status:'op'},
+  {code:'BAT-MOD-A100', item:'Battery Module Type-A', wh:'Jakarta', stock:24, min:40, status:'warn'},
+  {code:'CBL-DC-050', item:'Connector Cable DC-50', wh:'Surabaya', stock:9, min:30, status:'off'},
+  {code:'FAN-CL-200', item:'Cooling Fan Unit', wh:'Bandung', stock:14, min:25, status:'warn'},
+  {code:'PCB-CTRL-07', item:'Control Board PCB v7', wh:'Jakarta', stock:56, min:20, status:'op'},
+  {code:'RLY-40A-3P', item:'Relay 40A 3-Phase', wh:'Bali', stock:31, min:15, status:'op'},
 ];
 const MOCK_SHIP = [
   {id:'TRF-2026-00021', route:'Jakarta → Surabaya', carrier:'JNE Cargo', status:'transit', eta:'04 Sep 2026, 09:00', pod:'—'},
@@ -946,7 +988,7 @@ function renderIncTable(){
 function renderInvTable(){
   document.getElementById('invTable').innerHTML = INV_DATA.map(v=>{
     const pct = Math.min(100, Math.round(v.stock/(v.min*2)*100));
-    return `<tr><td class="mono">${v.sku}</td><td class="strong">${v.item}</td><td>Gudang ${v.wh}</td>
+    return `<tr><td class="mono">${v.code}</td><td class="strong">${v.item}</td><td>Gudang ${v.wh}</td>
     <td class="mono">${v.stock} pcs</td><td class="mono">${v.min} pcs</td>
     <td><div class="bar-track"><div class="bar-fill" style="width:${pct}%"></div></div></td>
     <td><span class="pill ${v.status}">${v.status==='op'?'Aman':v.status==='warn'?'Menipis':'Kritis'}</span></td></tr>`;
@@ -960,6 +1002,141 @@ function renderShipTable(){
     <td><span class="pill ${s.status}">${s.status==='transit'?'In Transit':'Diterima'}</span></td>
     <td class="mono">${s.eta}</td><td>${s.pod}</td></tr>`).join('')
     || `<tr><td colspan="6" style="color:var(--text-2)">Belum ada shipment.</td></tr>`;
+}
+
+/* ---------------- add-data modal ---------------- */
+const FORM_CONFIGS = {
+  asset: {
+    title: 'Tambah Aset', sub: 'Aset baru akan ditambahkan ke tab Assets di Google Sheets.',
+    endpoint: 'assets',
+    fields: [
+      {name:'asset_id', label:'Asset ID', placeholder:'CHG-JKT-030', required:true},
+      {name:'asset_name', label:'Nama Aset', placeholder:'AC Charger Kemang', required:true},
+      {name:'asset_type', label:'Tipe', type:'select', options:['EV Charger','Battery Swap Station'], required:true},
+      {name:'manufacturer', label:'Manufacturer', placeholder:'ABB / Huawei / dll'},
+      {name:'model', label:'Model', placeholder:''},
+      {name:'serial_number', label:'Serial Number', placeholder:''},
+      {name:'city', label:'Kota', placeholder:'Jakarta Selatan'},
+      {name:'latitude', label:'Latitude', placeholder:'-6.2607', type:'number'},
+      {name:'longitude', label:'Longitude', placeholder:'106.7816', type:'number'},
+      {name:'installation_date', label:'Tanggal Instalasi', placeholder:'03 Sep 2026'},
+      {name:'status', label:'Status', type:'select', options:['Operational','Warning','Offline','Maintenance'], required:true},
+    ],
+  },
+  workorder: {
+    title: 'Work Order Baru', sub: 'Ditambahkan ke tab WorkOrders di Google Sheets.',
+    endpoint: 'workorders',
+    fields: [
+      {name:'wo_id', label:'WO ID', placeholder:'WO-2026-0150', required:true},
+      {name:'asset_id', label:'Asset ID', placeholder:'CHG-SBY-011', required:true},
+      {name:'type', label:'Tipe', type:'select', options:['Preventive','Corrective'], required:true},
+      {name:'technician', label:'Teknisi', placeholder:'Nama teknisi'},
+      {name:'status', label:'Status', type:'select', options:['Operational','Warning','Offline','Maintenance'], required:true},
+      {name:'due_date', label:'Jadwal / Due Date', placeholder:'10 Sep 2026'},
+    ],
+  },
+  inventory: {
+    title: 'Stock Transfer / Tambah Stok', sub: 'Menambahkan atau memperbarui baris stok di tab Inventory.',
+    endpoint: 'inventory',
+    fields: [
+      {name:'material_code', label:'Material Code', placeholder:'BAT-MOD-A100', required:true},
+      {name:'item_name', label:'Nama Item', placeholder:'Battery Module Type-A', required:true},
+      {name:'warehouse', label:'Gudang', placeholder:'Jakarta', required:true},
+      {name:'stock', label:'Jumlah Stok', type:'number', placeholder:'0', required:true},
+      {name:'min_stock', label:'Minimum Stok', type:'number', placeholder:'0'},
+      {name:'status', label:'Status', type:'select', options:['Aman','Menipis','Kritis']},
+    ],
+  },
+  shipment: {
+    title: 'Buat Shipment', sub: 'Ditambahkan ke tab Shipments di Google Sheets.',
+    endpoint: 'shipments',
+    fields: [
+      {name:'shipment_id', label:'Shipment ID', placeholder:'TRF-2026-00024', required:true},
+      {name:'route', label:'Rute', placeholder:'Jakarta -> Bandung', required:true},
+      {name:'carrier', label:'Carrier', placeholder:'JNE Cargo / Internal Fleet'},
+      {name:'status', label:'Status', type:'select', options:['In Transit','Diterima'], required:true},
+      {name:'eta', label:'ETA', placeholder:'05 Sep 2026, 09:00'},
+      {name:'pod', label:'POD (Proof of Delivery)', placeholder:'— atau Signed'},
+    ],
+  },
+};
+
+let currentModalKey = null;
+
+function openModalForm(key){
+  const cfg = FORM_CONFIGS[key];
+  if(!cfg) return;
+  currentModalKey = key;
+  document.getElementById('modalTitle').textContent = cfg.title;
+  document.getElementById('modalSub').textContent = cfg.sub;
+  document.getElementById('modalFields').innerHTML = cfg.fields.map(f=>{
+    const id = 'mf_'+f.name;
+    if(f.type==='select'){
+      return `<div class="field-group">
+        <label class="field-label" for="${id}">${f.label}${f.required?' *':''}</label>
+        <select class="field-select" id="${id}">
+          <option value="">— pilih —</option>
+          ${f.options.map(o=>`<option value="${o}">${o}</option>`).join('')}
+        </select>
+      </div>`;
+    }
+    return `<div class="field-group">
+      <label class="field-label" for="${id}">${f.label}${f.required?' *':''}</label>
+      <input class="field-input" id="${id}" type="${f.type||'text'}" placeholder="${f.placeholder||''}">
+    </div>`;
+  }).join('');
+  const err = document.getElementById('modalError');
+  err.classList.remove('show'); err.textContent = '';
+  document.getElementById('modalOverlay').classList.add('show');
+}
+
+function closeModalForm(){
+  document.getElementById('modalOverlay').classList.remove('show');
+  currentModalKey = null;
+}
+
+async function submitModalForm(){
+  const cfg = FORM_CONFIGS[currentModalKey];
+  if(!cfg) return;
+  const err = document.getElementById('modalError');
+  err.classList.remove('show'); err.textContent = '';
+
+  const payload = {};
+  for(const f of cfg.fields){
+    const el = document.getElementById('mf_'+f.name);
+    const val = el.value.trim();
+    if(f.required && !val){
+      err.textContent = `${f.label} wajib diisi.`;
+      err.classList.add('show');
+      el.focus();
+      return;
+    }
+    payload[f.name] = val;
+  }
+
+  const btn = document.getElementById('modalSubmitBtn');
+  btn.disabled = true; btn.textContent = 'Menyimpan...';
+
+  try{
+    const res = await fetch(`/api/${cfg.endpoint}`, {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify(payload),
+    });
+    if(!res.ok){
+      const body = await res.json().catch(()=>({}));
+      throw new Error(body.error || `Gagal menyimpan (HTTP ${res.status})`);
+    }
+    closeModalForm();
+    await loadAllData();
+    renderDashboard(); renderMap(); renderSideList();
+    renderAssetsTable(); renderWoTable(); renderIncTable(); renderInvTable(); renderShipTable();
+  }catch(e){
+    err.textContent = 'Gagal menyimpan: ' + e.message + '. Cek apakah GOOGLE_SHEET_ID / Service Account sudah dikonfigurasi dengan benar di Cloudflare.';
+    err.classList.add('show');
+  }finally{
+    btn.disabled = false; btn.textContent = 'Simpan';
+  }
 }
 
 /* ---------------- boot ---------------- */
