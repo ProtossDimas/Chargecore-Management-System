@@ -1,4 +1,4 @@
-# NEXUS/OPS — Logistics & Asset Management System
+# CHARGECORE/OPS — Logistics & Asset Management System
 
 Sistem web untuk mengelola aset EV Charger & Battery Swap Station (BSS), maintenance, warehouse, inventory, dan logistik dalam satu control center. Tema visual futuristik senada dengan logo perusahaan (hijau elektrik di atas dasar gelap).
 
