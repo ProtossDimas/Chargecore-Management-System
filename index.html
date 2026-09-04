@@ -805,6 +805,8 @@ const DARK_MAP_STYLE = [
 ];
 const STATUS_COLOR = {op:'#5CE07A', warn:'#F2B94D', off:'#F0555B', mnt:'#5B6D68'};
 let gMap = null;
+let markersById = {};              // asset id / warehouse id -> google.maps.Marker
+const MAP_FILTER_STATE = { charger:true, bss:true, wh:true };
 
 function pinSVG(color, isWarehouse){
   const shape = isWarehouse
@@ -835,32 +837,82 @@ async function initRealMap(){
     mapDiv.style.cssText = 'position:absolute;inset:0;';
     host.insertBefore(mapDiv, host.firstChild);
 
-    const center = ASSETS.find(a=>!isNaN(a.lat)) || {lat:-6.2, lng:107.0};
     gMap = new google.maps.Map(mapDiv, {
-      center: {lat: center.lat || -6.2, lng: center.lng || 107.0}, zoom: 6,
+      center: {lat:-6.2, lng:107.0}, zoom: 6,
       styles: DARK_MAP_STYLE, disableDefaultUI:true, zoomControl:true,
     });
 
+    markersById = {};
+    const bounds = new google.maps.LatLngBounds();
+    let hasPoint = false;
+
     ASSETS.forEach(a=>{
       if(isNaN(a.lat) || isNaN(a.lng)) return;
+      const pos = {lat:a.lat, lng:a.lng};
       const marker = new google.maps.Marker({
-        position:{lat:a.lat, lng:a.lng}, map:gMap, title:a.id,
+        position:pos, map:gMap, title:a.id,
         icon:{url:pinSVG(STATUS_COLOR[a.status]||STATUS_COLOR.op,false), scaledSize:new google.maps.Size(22,22)},
       });
       marker.addListener('click', ()=> openDrawer(a));
+      markersById[a.id] = marker;
+      bounds.extend(pos);
+      hasPoint = true;
     });
     WAREHOUSES.forEach(w=>{
       if(isNaN(w.lat) || isNaN(w.lng)) return;
-      new google.maps.Marker({
-        position:{lat:w.lat, lng:w.lng}, map:gMap, title:w.name,
+      const pos = {lat:w.lat, lng:w.lng};
+      const marker = new google.maps.Marker({
+        position:pos, map:gMap, title:w.name,
         icon:{url:pinSVG(STATUS_COLOR.op,true), scaledSize:new google.maps.Size(20,20)},
       });
+      markersById['wh_'+w.id] = marker;
+      bounds.extend(pos);
+      hasPoint = true;
     });
+
+    // Fit the viewport to every marker instead of a fixed zoom, so assets scattered
+    // across different cities (Jakarta, Bandung, Surabaya, Bali, ...) are all visible
+    // on load, instead of only whichever city happens to be near the first asset.
+    if(hasPoint){
+      gMap.fitBounds(bounds, 60);
+      google.maps.event.addListenerOnce(gMap, 'bounds_changed', ()=>{
+        if(gMap.getZoom() > 15) gMap.setZoom(15); // don't over-zoom on a single point
+      });
+    }
+
+    applyMapFilters();
   }catch(e){
     // Maps failed to load (bad/missing key, or network) — keep the CSS mock map visible instead
     console.warn('Google Maps unavailable, falling back to preview map:', e);
     buildCssMap(host, true);
   }
+}
+
+/* Pan/zoom the live map to a specific asset and pop its marker, used by the sidebar
+   list and the search box. Falls back to nothing gracefully if Maps isn't active. */
+function focusAssetOnMap(assetId){
+  const marker = markersById[assetId];
+  if(!gMap || !marker){ return; }
+  gMap.panTo(marker.getPosition());
+  if(gMap.getZoom() < 14) gMap.setZoom(14);
+  marker.setAnimation(google.maps.Animation.BOUNCE);
+  setTimeout(()=> marker.setAnimation(null), 1400);
+}
+
+/* Show/hide markers according to the Charger / BSS / Warehouse filter chips. */
+function applyMapFilters(){
+  if(!gMap) return;
+  ASSETS.forEach(a=>{
+    const marker = markersById[a.id];
+    if(!marker) return;
+    const wanted = a.type==='BSS' ? MAP_FILTER_STATE.bss : MAP_FILTER_STATE.charger;
+    marker.setMap(wanted ? gMap : null);
+  });
+  WAREHOUSES.forEach(w=>{
+    const marker = markersById['wh_'+w.id];
+    if(!marker) return;
+    marker.setMap(MAP_FILTER_STATE.wh ? gMap : null);
+  });
 }
 
 function renderMap(){
@@ -884,15 +936,34 @@ function renderSideList(){
         <span class="pill ${a.status}">${STATUS_LABEL[a.status]}</span>
       </div>
       <div class="asset-card-meta"><span>${a.city}</span><span>·</span><span>${a.type}</span></div>`;
-    c.addEventListener('click', ()=> openDrawer(a));
+    c.addEventListener('click', ()=> { openDrawer(a); focusAssetOnMap(a.id); });
     sideList.appendChild(c);
   });
 }
 
-/* map filters (visual only) */
+/* map filters — Charger / BSS / Warehouse chips, now actually hide/show markers */
 document.querySelectorAll('.map-filter').forEach(f=>{
-  f.addEventListener('click', ()=> f.classList.toggle('on'));
+  f.addEventListener('click', ()=>{
+    f.classList.toggle('on');
+    MAP_FILTER_STATE[f.dataset.f] = f.classList.contains('on');
+    applyMapFilters();
+  });
 });
+
+/* map search — Enter to jump to the first matching asset (by ID or name) */
+const mapSearchInput = document.getElementById('mapSearch');
+if(mapSearchInput){
+  mapSearchInput.addEventListener('keydown', (e)=>{
+    if(e.key !== 'Enter') return;
+    const q = mapSearchInput.value.trim().toLowerCase();
+    if(!q) return;
+    const match = ASSETS.find(a => a.id.toLowerCase().includes(q) || (a.name||'').toLowerCase().includes(q));
+    if(match){
+      focusAssetOnMap(match.id);
+      openDrawer(match);
+    }
+  });
+}
 
 /* ---------------- drawer ---------------- */
 function openDrawer(a){
