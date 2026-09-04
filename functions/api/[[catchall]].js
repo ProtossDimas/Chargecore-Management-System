@@ -293,29 +293,72 @@ async function resolveGmapsLink(rawLink) {
   if (!link) return null;
 
   // Try extracting directly first (covers full/desktop links and typed coordinates)
-  let coords = extractLatLngFromUrl(link);
+  let coords = extractLatLngFromUrl(decodeUrlSafe(link)) || extractLatLngFromUrl(link);
   if (coords) return coords;
 
-  // Short links (maps.app.goo.gl, goo.gl/maps) don't contain coordinates in the
-  // URL itself — we have to follow the redirect to Google's real maps.google.com URL.
+  // Short links (maps.app.goo.gl, goo.gl/maps) don't contain coordinates in the URL
+  // itself — we have to follow the redirect(s) to Google's real maps.google.com URL.
   try {
     const u = new URL(link);
     if (SHORT_LINK_HOSTS.includes(u.hostname)) {
-      const res = await fetch(link, { redirect: "follow" });
-      // res.url is the final, expanded URL after following redirects
-      coords = extractLatLngFromUrl(res.url);
-      if (coords) return coords;
-      // Some redirects land on an HTML page instead of exposing coords in the URL;
-      // fall back to scanning the page body for the same patterns.
-      const body = await res.text();
-      coords = extractLatLngFromUrl(body);
+      coords = await followRedirectChainForCoords(link);
       if (coords) return coords;
     }
   } catch (e) {
-    // Invalid URL or network/redirect failure — treated as unresolved below
+    // Invalid URL — treated as unresolved below
   }
 
   return null;
+}
+
+// Walks the HTTP redirect chain ONE HOP AT A TIME (redirect: "manual"), reading only the
+// `Location` header at each hop — never the rendered page body/HTML. This is deliberate:
+// an earlier version fell back to scanning the final page's HTML for a lat/lng-looking
+// pattern when the URL itself didn't have one, and that occasionally matched an unrelated
+// coordinate elsewhere on the page (e.g. a consent/interstitial page Google can show to
+// non-browser requests), silently pointing the marker at the wrong city. Reading only
+// Location headers is far more trustworthy: that's the literal address Google is sending
+// the request to, so if it doesn't contain coordinates we correctly report "unresolved"
+// instead of guessing.
+async function followRedirectChainForCoords(startUrl, maxHops = 6) {
+  let current = startUrl;
+  const browserHeaders = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+  };
+
+  for (let hop = 0; hop < maxHops; hop++) {
+    const decoded = decodeUrlSafe(current);
+    let coords = extractLatLngFromUrl(decoded) || extractLatLngFromUrl(current);
+    if (coords) return coords;
+
+    let res;
+    try {
+      res = await fetch(current, { redirect: "manual", headers: browserHeaders });
+    } catch (e) {
+      return null;
+    }
+
+    const location = res.headers.get("location");
+    if (!location) {
+      // No further redirect and no coordinates in the URL we ended on — genuinely
+      // unresolved. We do NOT read res.text() here on purpose (see comment above).
+      return null;
+    }
+    current = new URL(location, current).toString();
+  }
+  return null; // too many hops — bail out rather than loop forever
+}
+
+// Google's redirect chain sometimes wraps the real destination as a percent-encoded
+// `continue=` / `q=` parameter (e.g. consent.google.com?continue=https%3A%2F%2Fwww...
+// %40-6.24...%2C106.79...). Decoding lets our plain-text regexes see the "@" and ","
+// characters that would otherwise be hidden as %40 / %2C.
+function decodeUrlSafe(text) {
+  try {
+    return decodeURIComponent(text);
+  } catch (e) {
+    return text;
+  }
 }
 
 // Mutates `body` in place: if body.gmaps_link is present and resolvable, overwrites
