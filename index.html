@@ -698,7 +698,7 @@ async function loadAllData(){
     ASSETS = assetsRaw.map(r=>({
       id:r.asset_id, name:r.asset_name, type:(r.asset_type||'').toLowerCase().includes('bss')?'BSS':'Charger',
       city:r.city, status:statusToClass(r.status), install:r.installation_date, maint:r.last_maintenance,
-      serial:r.serial_number, lat:parseFloat(r.latitude), lng:parseFloat(r.longitude),
+      serial:r.serial_number, lat:parseFloat(r.latitude), lng:parseFloat(r.longitude), gmapsLink:r.gmaps_link||'',
     }));
     WAREHOUSES = (locRaw||[]).filter(r=>(r.location_type||'').toLowerCase().includes('warehouse')).map(r=>({
       id:r.location_id, name:r.location_name, lat:parseFloat(r.latitude), lng:parseFloat(r.longitude),
@@ -907,9 +907,11 @@ function openDrawer(a){
     <div class="tl-item"><div class="tl-title">Preventive maintenance selesai</div><div class="tl-meta">${a.maint} · Teknisi lapangan</div></div>
     <div class="tl-item"><div class="tl-title">Status berubah menjadi ${STATUS_LABEL[a.status]}</div><div class="tl-meta">Sistem monitoring otomatis</div></div>
     <div class="tl-item"><div class="tl-title">Aset dipasang di lokasi</div><div class="tl-meta">${a.install}</div></div>`;
-  const navUrl = (!isNaN(a.lat) && !isNaN(a.lng))
-    ? `https://www.google.com/maps/dir/?api=1&destination=${a.lat},${a.lng}`
-    : `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(a.name+' '+(a.city||''))}`;
+  const navUrl = a.gmapsLink
+    ? a.gmapsLink
+    : (!isNaN(a.lat) && !isNaN(a.lng))
+      ? `https://www.google.com/maps/dir/?api=1&destination=${a.lat},${a.lng}`
+      : `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(a.name+' '+(a.city||''))}`;
   document.getElementById('dwNavigate').onclick = ()=> window.open(navUrl, '_blank');
   document.getElementById('overlay').classList.add('show');
   document.getElementById('drawer').classList.add('show');
@@ -1017,8 +1019,7 @@ const FORM_CONFIGS = {
       {name:'model', label:'Model', placeholder:''},
       {name:'serial_number', label:'Serial Number', placeholder:''},
       {name:'city', label:'Kota', placeholder:'Jakarta Selatan'},
-      {name:'latitude', label:'Latitude', placeholder:'-6.2607', type:'number'},
-      {name:'longitude', label:'Longitude', placeholder:'106.7816', type:'number'},
+      {name:'gmaps_link', label:'Link Google Maps', placeholder:'Tempel link share dari Google Maps (app/web)', required:true, hint:'gmaps'},
       {name:'installation_date', label:'Tanggal Instalasi', placeholder:'03 Sep 2026'},
       {name:'status', label:'Status', type:'select', options:['Operational','Warning','Offline','Maintenance'], required:true},
     ],
@@ -1080,6 +1081,16 @@ function openModalForm(key){
         </select>
       </div>`;
     }
+    if(f.hint==='gmaps'){
+      return `<div class="field-group">
+        <label class="field-label" for="${id}">${f.label}${f.required?' *':''}</label>
+        <div style="display:flex; gap:8px;">
+          <input class="field-input" id="${id}" type="text" placeholder="${f.placeholder||''}" style="flex:1;">
+          <button type="button" class="btn" onclick="checkGmapsLink('${id}')" style="white-space:nowrap; padding:0 14px;">Cek lokasi</button>
+        </div>
+        <div class="field-hint" id="${id}_preview" style="font-size:12px; color:var(--text-2); margin-top:4px;"></div>
+      </div>`;
+    }
     return `<div class="field-group">
       <label class="field-label" for="${id}">${f.label}${f.required?' *':''}</label>
       <input class="field-input" id="${id}" type="${f.type||'text'}" placeholder="${f.placeholder||''}">
@@ -1088,6 +1099,31 @@ function openModalForm(key){
   const err = document.getElementById('modalError');
   err.classList.remove('show'); err.textContent = '';
   document.getElementById('modalOverlay').classList.add('show');
+}
+
+async function checkGmapsLink(inputId){
+  const input = document.getElementById(inputId);
+  const preview = document.getElementById(inputId+'_preview');
+  const link = input.value.trim();
+  if(!link){ preview.textContent = 'Tempel link Google Maps dulu.'; preview.style.color = 'var(--amber)'; return; }
+  preview.textContent = 'Membaca koordinat...'; preview.style.color = 'var(--text-2)';
+  try{
+    const res = await fetch('/api/resolve-gmaps-link', {
+      method: 'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({ link }),
+    });
+    const data = await res.json();
+    if(res.ok && data.lat!==undefined){
+      preview.textContent = `✓ Titik ditemukan: ${data.lat.toFixed(5)}, ${data.lng.toFixed(5)}`;
+      preview.style.color = 'var(--green)';
+    } else {
+      preview.textContent = data.error || 'Link tidak bisa dibaca. Pastikan ini link Google Maps yang valid.';
+      preview.style.color = 'var(--red)';
+    }
+  }catch(e){
+    preview.textContent = 'Gagal mengecek link (cek koneksi).';
+    preview.style.color = 'var(--red)';
+  }
 }
 
 function closeModalForm(){
