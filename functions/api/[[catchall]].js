@@ -11,7 +11,11 @@
 //                                   (paste with real \n line breaks converted to literal
 //                                    "\n" — this file handles both, see normalizePrivateKey)
 //   GOOGLE_SHEET_ID                the spreadsheet ID from its URL
-//   GOOGLE_MAPS_API_KEY            your Google Maps JavaScript API key
+//   GOOGLE_MAPS_API_KEY            your Google Maps API key. Used for the frontend map,
+//                                   AND server-side as a fallback to resolve share links
+//                                   (see gmaps_link notes below) — make sure "Geocoding API"
+//                                   is enabled for this key in Google Cloud Console, not
+//                                   just "Maps JavaScript API".
 //
 // SPREADSHEET STRUCTURE — create one Google Sheet with these tabs (exact header row):
 //
@@ -23,13 +27,25 @@
 //
 //   NOTE ON gmaps_link -> latitude/longitude:
 //   `latitude`/`longitude` are OPTIONAL to fill by hand — you can leave them blank and
-//   only fill `gmaps_link` when entering rows directly in the Sheet. The server resolves
-//   coordinates from the link automatically in two places:
+//   only fill `gmaps_link` (any Google Maps share link, including short maps.app.goo.gl
+//   links) when entering rows directly in the Sheet. The server resolves coordinates
+//   from the link automatically in two places:
 //     1. On every POST/PUT from the web form (resolveGmapsLinkInPlace).
 //     2. On every GET, for any row that still has an empty latitude/longitude but a
 //        gmaps_link (backfillCoordsFromLinks) — it resolves the link, returns the
 //        coordinates immediately for the map, and writes them back into the Sheet so
 //        it only has to resolve that row once.
+//   Resolution itself has two tiers (resolveGmapsLink):
+//     a. Read coordinates straight out of the URL / redirect chain (fast, no API call).
+//        Short links are expanded by following HTTP `Location` headers one hop at a
+//        time — never by scraping page HTML, which is unreliable and can pick up an
+//        unrelated coordinate from the page.
+//     b. If that doesn't turn up coordinates but does turn up a place NAME (e.g.
+//        ".../maps/place/Blok+M+Square/..."), that name is looked up via Google's
+//        official Geocoding API using GOOGLE_MAPS_API_KEY. This needs "Geocoding API"
+//        enabled for that key in Google Cloud Console.
+//   If both tiers fail, the link is left unresolved (latitude/longitude untouched) rather
+//   than guessing — a missing pin is preferable to a wrong one.
 //   latitude/longitude columns should stay in the header row (don't delete the columns),
 //   just leave the cells empty for rows entered manually with only a link.
 //
@@ -76,7 +92,7 @@ export async function onRequest(context) {
     // e.g. so it can drop a pin on the form. POST { link: "..." }
     if (path === "/api/resolve-gmaps-link" && request.method === "POST") {
       const body = await request.json();
-      const coords = await resolveGmapsLink(body.link || body.gmaps_link || "");
+      const coords = await resolveGmapsLink(body.link || body.gmaps_link || "", env);
       return json(coords || { error: "Tidak bisa membaca koordinat dari link ini" }, cors, coords ? 200 : 422);
     }
 
@@ -106,14 +122,14 @@ export async function onRequest(context) {
 
       if (request.method === "POST") {
         const body = await request.json();
-        await resolveGmapsLinkInPlace(body);
+        await resolveGmapsLinkInPlace(body, env);
         await appendRow(env, sheetName, body);
         return json({ ok: true }, cors);
       }
 
       if (request.method === "PUT") {
         const body = await request.json();
-        await resolveGmapsLinkInPlace(body);
+        await resolveGmapsLinkInPlace(body, env);
         const idField = Object.keys(body)[0]; // first field = id column, e.g. asset_id
         await updateRow(env, sheetName, idField, body);
         return json({ ok: true }, cors);
@@ -229,7 +245,7 @@ async function backfillCoordsFromLinks(env, sheetName, rows, idField) {
   if (missing.length === 0) return;
 
   for (const row of missing) {
-    const coords = await resolveGmapsLink(row.gmaps_link);
+    const coords = await resolveGmapsLink(row.gmaps_link, env);
     if (!coords) continue;
     row.latitude = coords.lat;
     row.longitude = coords.lng;
@@ -288,7 +304,7 @@ function extractLatLngFromUrl(text) {
   return null;
 }
 
-async function resolveGmapsLink(rawLink) {
+async function resolveGmapsLink(rawLink, env) {
   const link = (rawLink || "").toString().trim();
   if (!link) return null;
 
@@ -298,16 +314,60 @@ async function resolveGmapsLink(rawLink) {
 
   // Short links (maps.app.goo.gl, goo.gl/maps) don't contain coordinates in the URL
   // itself — we have to follow the redirect(s) to Google's real maps.google.com URL.
+  let placeNameCandidate = null;
   try {
     const u = new URL(link);
     if (SHORT_LINK_HOSTS.includes(u.hostname)) {
-      coords = await followRedirectChainForCoords(link);
-      if (coords) return coords;
+      const result = await followRedirectChainForCoords(link);
+      if (result && result.coords) return result.coords;
+      placeNameCandidate = result && result.placeName;
+    } else {
+      placeNameCandidate = extractPlaceName(link);
     }
   } catch (e) {
-    // Invalid URL — treated as unresolved below
+    // Invalid URL — fall through to the geocoding fallback below (nothing to try there either)
   }
 
+  // Last resort: the link didn't hand us coordinates directly, but it (or the page it
+  // redirected to) told us a PLACE NAME (e.g. ".../maps/place/Blok+M+Square/..."). Look
+  // that name up via Google's official Geocoding API instead of guessing from page HTML —
+  // this only runs if GOOGLE_MAPS_API_KEY is configured, and if it fails we correctly
+  // report "unresolved" rather than pointing the marker somewhere wrong.
+  if (placeNameCandidate && env && env.GOOGLE_MAPS_API_KEY) {
+    coords = await geocodePlaceName(placeNameCandidate, env.GOOGLE_MAPS_API_KEY);
+    if (coords) return coords;
+  }
+
+  return null;
+}
+
+// Pulls a human place name out of a maps.google.com URL, e.g.
+// ".../maps/place/Blok+M+Square/@-6.24,106.79,17z/..." -> "Blok M Square"
+function extractPlaceName(url) {
+  const m = url.match(/\/maps\/place\/([^\/@]+)/);
+  if (!m) return null;
+  try {
+    return decodeURIComponent(m[1].replace(/\+/g, " ")).trim() || null;
+  } catch (e) {
+    return null;
+  }
+}
+
+// Looks a place name up via Google's Geocoding API (the same key used for the Maps
+// JavaScript API — make sure "Geocoding API" is also enabled for it in Google Cloud
+// Console). `region: "id"` biases ambiguous results toward Indonesia.
+async function geocodePlaceName(placeName, apiKey) {
+  try {
+    const url = `https://maps.googleapis.com/maps/api/geocode/json?address=${encodeURIComponent(placeName)}&region=id&key=${apiKey}`;
+    const res = await fetch(url);
+    const data = await res.json();
+    const loc = data && data.results && data.results[0] && data.results[0].geometry && data.results[0].geometry.location;
+    if (loc && typeof loc.lat === "number" && typeof loc.lng === "number") {
+      return { lat: loc.lat, lng: loc.lng };
+    }
+  } catch (e) {
+    // network/API error — treated as unresolved
+  }
   return null;
 }
 
@@ -322,6 +382,7 @@ async function resolveGmapsLink(rawLink) {
 // instead of guessing.
 async function followRedirectChainForCoords(startUrl, maxHops = 6) {
   let current = startUrl;
+  let lastPlaceName = null;
   const browserHeaders = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
   };
@@ -329,24 +390,27 @@ async function followRedirectChainForCoords(startUrl, maxHops = 6) {
   for (let hop = 0; hop < maxHops; hop++) {
     const decoded = decodeUrlSafe(current);
     let coords = extractLatLngFromUrl(decoded) || extractLatLngFromUrl(current);
-    if (coords) return coords;
+    if (coords) return { coords, placeName: null };
+
+    lastPlaceName = extractPlaceName(decoded) || extractPlaceName(current) || lastPlaceName;
 
     let res;
     try {
       res = await fetch(current, { redirect: "manual", headers: browserHeaders });
     } catch (e) {
-      return null;
+      return { coords: null, placeName: lastPlaceName };
     }
 
     const location = res.headers.get("location");
     if (!location) {
-      // No further redirect and no coordinates in the URL we ended on — genuinely
-      // unresolved. We do NOT read res.text() here on purpose (see comment above).
-      return null;
+      // No further redirect and no coordinates in the URL we ended on. We do NOT read
+      // res.text() here on purpose (see comment above) — return whatever place name we
+      // picked up along the way so the caller can try the Geocoding API instead.
+      return { coords: null, placeName: lastPlaceName };
     }
     current = new URL(location, current).toString();
   }
-  return null; // too many hops — bail out rather than loop forever
+  return { coords: null, placeName: lastPlaceName }; // too many hops — bail out rather than loop forever
 }
 
 // Google's redirect chain sometimes wraps the real destination as a percent-encoded
@@ -365,9 +429,9 @@ function decodeUrlSafe(text) {
 // body.latitude / body.longitude with the resolved coordinates. Leaves existing
 // latitude/longitude untouched if the link is missing or can't be resolved, so a
 // bad paste never wipes out a previously-good pin.
-async function resolveGmapsLinkInPlace(body) {
+async function resolveGmapsLinkInPlace(body, env) {
   if (!body || !body.gmaps_link) return;
-  const coords = await resolveGmapsLink(body.gmaps_link);
+  const coords = await resolveGmapsLink(body.gmaps_link, env);
   if (coords) {
     body.latitude = coords.lat;
     body.longitude = coords.lng;
