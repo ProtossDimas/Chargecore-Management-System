@@ -16,10 +16,22 @@
 // SPREADSHEET STRUCTURE — create one Google Sheet with these tabs (exact header row):
 //
 //   Assets        | asset_id | asset_name | asset_type | manufacturer | model | serial_number
-//                 | location_id | location_name | city | latitude | longitude
+//                 | location_id | location_name | city | latitude | longitude | gmaps_link
 //                 | installation_date | status | last_maintenance
 //
-//   Locations     | location_id | location_name | location_type | city | latitude | longitude
+//   Locations     | location_id | location_name | location_type | city | latitude | longitude | gmaps_link
+//
+//   NOTE ON gmaps_link -> latitude/longitude:
+//   `latitude`/`longitude` are OPTIONAL to fill by hand — you can leave them blank and
+//   only fill `gmaps_link` when entering rows directly in the Sheet. The server resolves
+//   coordinates from the link automatically in two places:
+//     1. On every POST/PUT from the web form (resolveGmapsLinkInPlace).
+//     2. On every GET, for any row that still has an empty latitude/longitude but a
+//        gmaps_link (backfillCoordsFromLinks) — it resolves the link, returns the
+//        coordinates immediately for the map, and writes them back into the Sheet so
+//        it only has to resolve that row once.
+//   latitude/longitude columns should stay in the header row (don't delete the columns),
+//   just leave the cells empty for rows entered manually with only a link.
 //
 //   WorkOrders    | wo_id | asset_id | type | technician | status | due_date
 //
@@ -60,6 +72,14 @@ export async function onRequest(context) {
       return json({ mapsApiKey: env.GOOGLE_MAPS_API_KEY || "" }, cors);
     }
 
+    // Lets the frontend preview a pasted Google Maps link -> {lat, lng} before saving,
+    // e.g. so it can drop a pin on the form. POST { link: "..." }
+    if (path === "/api/resolve-gmaps-link" && request.method === "POST") {
+      const body = await request.json();
+      const coords = await resolveGmapsLink(body.link || body.gmaps_link || "");
+      return json(coords || { error: "Tidak bisa membaca koordinat dari link ini" }, cors, coords ? 200 : 422);
+    }
+
     if (path === "/api/dashboard") {
       const [assets, incidents, shipments, inventory] = await Promise.all([
         readSheet(env, SHEETS.assets),
@@ -78,17 +98,22 @@ export async function onRequest(context) {
 
       if (request.method === "GET") {
         const rows = await readSheet(env, sheetName);
+        if (key === "assets" || key === "locations") {
+          await backfillCoordsFromLinks(env, sheetName, rows, key === "assets" ? "asset_id" : "location_id");
+        }
         return json(rows, cors);
       }
 
       if (request.method === "POST") {
         const body = await request.json();
+        await resolveGmapsLinkInPlace(body);
         await appendRow(env, sheetName, body);
         return json({ ok: true }, cors);
       }
 
       if (request.method === "PUT") {
         const body = await request.json();
+        await resolveGmapsLinkInPlace(body);
         const idField = Object.keys(body)[0]; // first field = id column, e.g. asset_id
         await updateRow(env, sheetName, idField, body);
         return json({ ok: true }, cors);
@@ -192,6 +217,118 @@ function arrayBufferToBase64Url(buf) {
   const bytes = new Uint8Array(buf);
   for (let i = 0; i < bytes.byteLength; i++) binary += String.fromCharCode(bytes[i]);
   return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
+
+// Handles rows that were entered directly in the Google Sheet (no web form involved),
+// where the user only filled `gmaps_link` and left latitude/longitude blank. Called on
+// every GET for assets/locations: resolves any missing coordinates so the map still
+// works immediately, AND writes the resolved lat/lng back into the sheet cells so this
+// only has to happen once per row (subsequent reads are plain number lookups again).
+async function backfillCoordsFromLinks(env, sheetName, rows, idField) {
+  const missing = rows.filter((r) => r.gmaps_link && (r.latitude === "" || r.longitude === "" || r.latitude === undefined || r.longitude === undefined));
+  if (missing.length === 0) return;
+
+  for (const row of missing) {
+    const coords = await resolveGmapsLink(row.gmaps_link);
+    if (!coords) continue;
+    row.latitude = coords.lat;
+    row.longitude = coords.lng;
+    // Fire-and-forget-ish write-back; awaited so we don't hammer the Sheets API
+    // with overlapping writes, but failures here shouldn't break the GET response.
+    try {
+      await updateRow(env, sheetName, idField, {
+        [idField]: row[idField],
+        latitude: coords.lat,
+        longitude: coords.lng,
+      });
+    } catch (e) {
+      // Sheet write-back failed (e.g. transient API error) — the response still has
+      // the resolved coords this time, it'll just re-resolve next GET too.
+    }
+  }
+}
+
+// ------------------------------------------------------------
+// Google Maps link -> {lat, lng}
+// ------------------------------------------------------------
+//
+// Accepts anything a user might paste from the "Share" button in Google Maps
+// (app or web), a desktop URL copied from the address bar, or a raw
+// "lat,lng" pair typed by hand:
+//
+//   https://maps.app.goo.gl/xxxxxxxx                                (short link, needs a redirect fetch)
+//   https://goo.gl/maps/xxxxxxxx                                    (old short link, same handling)
+//   https://www.google.com/maps/place/Name/@-6.2615,106.8106,17z/... (place link with @lat,lng)
+//   https://www.google.com/maps/place/.../data=!...!3d-6.2615!4d106.8106  (place data param)
+//   https://www.google.com/maps?q=-6.2615,106.8106                  (q= query param)
+//   https://www.google.com/maps/@-6.2615,106.8106,15z               (plain @lat,lng, no place)
+//   -6.2615, 106.8106                                                (typed coordinates)
+
+const SHORT_LINK_HOSTS = ["maps.app.goo.gl", "goo.gl"];
+
+function extractLatLngFromUrl(text) {
+  if (!text) return null;
+
+  // Most precise: the !3d<lat>!4d<lng> pair Google embeds for the actual pin
+  let m = text.match(/!3d(-?\d+\.\d+)!4d(-?\d+\.\d+)/);
+  if (m) return { lat: parseFloat(m[1]), lng: parseFloat(m[2]) };
+
+  // @lat,lng,zoom — the map viewport center, present on almost every maps.google.com URL
+  m = text.match(/@(-?\d+\.\d+),(-?\d+\.\d+)/);
+  if (m) return { lat: parseFloat(m[1]), lng: parseFloat(m[2]) };
+
+  // ?q=lat,lng or &ll=lat,lng
+  m = text.match(/[?&](?:q|query|ll)=(-?\d+\.\d+),(-?\d+\.\d+)/);
+  if (m) return { lat: parseFloat(m[1]), lng: parseFloat(m[2]) };
+
+  // Plain "lat, lng" typed directly, no URL at all
+  m = text.trim().match(/^(-?\d+\.\d+)\s*,\s*(-?\d+\.\d+)$/);
+  if (m) return { lat: parseFloat(m[1]), lng: parseFloat(m[2]) };
+
+  return null;
+}
+
+async function resolveGmapsLink(rawLink) {
+  const link = (rawLink || "").toString().trim();
+  if (!link) return null;
+
+  // Try extracting directly first (covers full/desktop links and typed coordinates)
+  let coords = extractLatLngFromUrl(link);
+  if (coords) return coords;
+
+  // Short links (maps.app.goo.gl, goo.gl/maps) don't contain coordinates in the
+  // URL itself — we have to follow the redirect to Google's real maps.google.com URL.
+  try {
+    const u = new URL(link);
+    if (SHORT_LINK_HOSTS.includes(u.hostname)) {
+      const res = await fetch(link, { redirect: "follow" });
+      // res.url is the final, expanded URL after following redirects
+      coords = extractLatLngFromUrl(res.url);
+      if (coords) return coords;
+      // Some redirects land on an HTML page instead of exposing coords in the URL;
+      // fall back to scanning the page body for the same patterns.
+      const body = await res.text();
+      coords = extractLatLngFromUrl(body);
+      if (coords) return coords;
+    }
+  } catch (e) {
+    // Invalid URL or network/redirect failure — treated as unresolved below
+  }
+
+  return null;
+}
+
+// Mutates `body` in place: if body.gmaps_link is present and resolvable, overwrites
+// body.latitude / body.longitude with the resolved coordinates. Leaves existing
+// latitude/longitude untouched if the link is missing or can't be resolved, so a
+// bad paste never wipes out a previously-good pin.
+async function resolveGmapsLinkInPlace(body) {
+  if (!body || !body.gmaps_link) return;
+  const coords = await resolveGmapsLink(body.gmaps_link);
+  if (coords) {
+    body.latitude = coords.lat;
+    body.longitude = coords.lng;
+  }
 }
 
 // ------------------------------------------------------------
